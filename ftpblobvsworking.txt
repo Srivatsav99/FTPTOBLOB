@@ -1,0 +1,170 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Net;
+
+class Program
+{
+    static void Main()
+    {
+        string wantFile = "azcopy.exe";
+        bool azCopyExists = File.Exists(wantFile);
+
+        Console.WriteLine("AzCopy exists: " + azCopyExists);
+
+        if (!azCopyExists)
+        {
+            Console.WriteLine("AzCopy not found. Downloading...");
+
+            // Download AzCopy
+            using (var client = new WebClient())
+            {
+                client.DownloadFile("https://aka.ms/downloadazcopy-v10-windows", "AzCopy.zip");
+            }
+
+            Console.WriteLine("Expanding archive...");
+            // Expand Archive
+            ZipFile.ExtractToDirectory("AzCopy.zip", "AzCopy", true);
+
+            // Copy AzCopy to current directory
+            string azCopyExePath = Path.Combine(Directory.GetDirectories("AzCopy")[0], "azcopy.exe");
+            File.Copy(azCopyExePath, "AzCopy.exe");
+        }
+        else
+        {
+            Console.WriteLine("AzCopy found, skipping download.");
+        }
+
+        // Set environment values for AzCopy
+        Environment.SetEnvironmentVariable("AZCOPY_LOG_LOCATION", Path.Combine(Path.GetTempPath(), ".azcopy"));
+        Environment.SetEnvironmentVariable("AZCOPY_JOB_PLAN_LOCATION", Path.Combine(Path.GetTempPath(), ".azcopy"));
+        string ftpUrl = "ftp://pimliveweb.northeurope.cloudapp.azure.com//Welgosh-outbound/stock/"; // FTP folder URL
+        string ftpUsername = "srivatsav"; // FTP username
+        string ftpPassword = "D3psTqEUO4lXMKx"; // FTP password
+        string storageAccountName = "pimlivedisks216";
+        string storageAccountKey = "0H6Kxp9+IizKvooiPDYuCPjzWkifjTJsg1dKmDxuutDJc+cz13bpgzW3hDCIKl/qR789G6bvdzToLwzmO0q7fA==";
+        string sasToken = "?sv=2020-08-04&ss=b&srt=sco&sp=rwdlacx&se=2023-07-31T00:00:00Z&st=2022-07-01T00:00:00Z&spr=https&sig=yourSignature";
+        string containerName = "pimimport";
+        string blobFolderPath = "Mongo-dolfin-test";
+        string downloadPath = @"C:\ANATWINE\"; // Specify the download directory path
+
+        string lastModifiedFileName = null;
+        DateTime lastModified = DateTime.MinValue;
+
+        // Create FTP request
+        FtpWebRequest request = (FtpWebRequest)WebRequest.Create(ftpUrl);
+        request.Method = WebRequestMethods.Ftp.ListDirectoryDetails;
+        request.Credentials = new NetworkCredential(ftpUsername, ftpPassword);
+
+        // Get the file listing
+        using (FtpWebResponse response = (FtpWebResponse)request.GetResponse())
+        using (Stream responseStream = response.GetResponseStream())
+        using (StreamReader reader = new StreamReader(responseStream))
+        {
+            string[] fileDetails = reader.ReadToEnd().Split(new string[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (string fileDetail in fileDetails)
+            {
+                string[] split = fileDetail.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                if (split.Length >= 9)
+                {
+                    string date = split[5];
+                    string time = split[6];
+                    string fileName = split[8];
+
+                    string dateTimeString = date + " " + time;
+                    DateTime fileLastModified;
+
+                    if (DateTime.TryParse(dateTimeString, out fileLastModified))
+                    {
+                        if (fileLastModified > lastModified)
+                        {
+                            lastModified = fileLastModified;
+                            lastModifiedFileName = fileName;
+                        }
+                    }
+                }
+            }
+
+            if (lastModifiedFileName != null)
+            {
+                // Download the file
+                string downloadFilePath = Path.Combine(downloadPath, lastModifiedFileName);
+                using (WebClient client = new WebClient())
+                {
+                    client.Credentials = new NetworkCredential(ftpUsername, ftpPassword);
+                    client.DownloadFile(ftpUrl + lastModifiedFileName, downloadFilePath);
+                    Console.WriteLine("File downloaded successfully.");
+                }
+
+                string sourcePath = downloadFilePath;
+                string destinationUrl = $"https://{storageAccountName}.blob.core.windows.net/{containerName}/{blobFolderPath}/"; //{Path.GetFileName(lastModifiedFileName)}";
+                //destinationUrl += storageAccountKey;
+                AzCopyUploader.UploadFilesToBlobContainer(sourcePath, destinationUrl);
+            }
+        }
+    }
+}
+
+public class AzCopyUploader
+{
+    public static void UploadFilesToBlobContainer(string sourcePath, string destinationUrl)
+    {
+        try
+        {
+            // Set the path to the azcopy executable
+            string azCopyPath = @"C:\Users\Srivatsav.Vangala\Downloads\azcopy_windows_amd64_10.19.0\azcopy_windows_amd64_10.19.0\azcopy.exe";
+
+            // Construct the command to upload the files
+            string command = $"\"{azCopyPath}\" login {sasToken} && \"{azCopyPath}\" copy \"{sourcePath}\" \"{destinationUrl}\" --recursive=true";
+
+            // Create a new process start info
+            ProcessStartInfo processStartInfo = new ProcessStartInfo("cmd.exe")
+            {
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            // Start the process
+            Process process = new Process
+            {
+                StartInfo = processStartInfo
+            };
+            process.Start();
+
+            // Write the azcopy command to the process standard input
+            process.StandardInput.WriteLine(command);
+            process.StandardInput.WriteLine("exit");
+
+            // Read the output and error messages
+            string output = process.StandardOutput.ReadToEnd();
+            string error = process.StandardError.ReadToEnd();
+
+            // Wait for the process to exit
+            process.WaitForExit();
+
+            // Check for any errors
+            if (!string.IsNullOrEmpty(error))
+            {
+                Console.WriteLine("An error occurred during the upload:");
+                Console.WriteLine(error);
+            }
+            else
+            {
+                Console.WriteLine("Upload completed successfully!");
+                Console.WriteLine(output);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("An exception occurred:");
+            Console.WriteLine(ex.Message);
+        }
+    }
+}
